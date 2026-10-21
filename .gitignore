@@ -1,0 +1,11 @@
+# Build output
+build/
+
+# Real credentials - copy secrets.h.example to secrets.h and edit
+secrets.h
+mac/wakeup.env
+
+# Editor / tooling
+.vscode/
+.cache/
+compile_commands.json

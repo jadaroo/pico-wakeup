@@ -1,0 +1,21 @@
+# Tells logind when the desktop session is idle (no keyboard/mouse input).
+# logind's IdleAction (20-idle-suspend.conf) then suspends once *all*
+# sessions are idle. An open SSH session never counts as idle.
+#
+# Install: cp swayidle.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload
+#          systemctl --user enable --now swayidle.service
+[Unit]
+Description=Report desktop idle state to logind (swayidle)
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+# idlehint 300: mark the session idle after 5 min without input.
+# Video players and the like that inhibit idle are respected by the compositor.
+ExecStart=/usr/bin/swayidle -w idlehint 300
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

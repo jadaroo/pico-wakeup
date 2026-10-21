@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Send a command to the Pico (default: "wakeup") and print its status replies.
 #
-#   ./wake-thinkpad.sh            # wake the ThinkPad
-#   ./wake-thinkpad.sh status     # just ask for the current status
-#   ./wake-thinkpad.sh toggle     # toggle the Pico's LED
+#   ./wake.sh            # wake the ThinkPad
+#   ./wake.sh status     # just ask for the current status
+#   ./wake.sh toggle     # toggle the Pico's LED
 #
-# Needs: brew install mosquitto
+# Needs the mosquitto clients: brew install mosquitto (macOS),
+# sudo pacman -S mosquitto (Arch), sudo apt install mosquitto-clients (Debian/Ubuntu)
 # Reads MQTT_HOST, MQTT_USER, MQTT_PASS from wakeup.env next to this script
 # (copy wakeup.env.example), or from the file named by $WAKEUP_ENV.
 set -euo pipefail

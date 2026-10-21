@@ -2,7 +2,7 @@
 # logind's IdleAction (20-idle-suspend.conf) then suspends once *all*
 # sessions are idle. An open SSH session never counts as idle.
 #
-# Install: cp swayidle.service ~/.config/systemd/user/
+# Install: cp host/swayidle.service ~/.config/systemd/user/
 #          systemctl --user daemon-reload
 #          systemctl --user enable --now swayidle.service
 [Unit]

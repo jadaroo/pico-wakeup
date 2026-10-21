@@ -1,9 +1,9 @@
 # Build output
 build/
 
-# Real credentials - copy secrets.h.example to secrets.h and edit
-secrets.h
-mac/wakeup.env
+# Real credentials: copy the .example files and fill them in
+firmware/secrets.h
+client/wakeup.env
 
 # Editor / tooling
 .vscode/

@@ -16,14 +16,20 @@ if (NOT EXISTS ${CMAKE_CURRENT_LIST_DIR}/secrets.h)
 endif()
 
 add_executable(wakeup
-    main.c
-    usb_keyboard.c
-    usb_descriptors.c
+    src/main.c
+    src/usb_keyboard.c
+    src/usb_descriptors.c
 )
 
-# lwipopts.h, mbedtls_config.h, tusb_config.h and secrets.h live next to the
-# sources; lwIP, mbedTLS and TinyUSB find their config headers via this path.
-target_include_directories(wakeup PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+# src/:    our own headers
+# config/: lwipopts.h, mbedtls_config.h, tusb_config.h - lwIP, mbedTLS and
+#          TinyUSB look for these by name on the include path
+# .:       secrets.h (gitignored, next to this file)
+target_include_directories(wakeup PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/config
+    ${CMAKE_CURRENT_LIST_DIR}
+)
 
 target_compile_definitions(wakeup PRIVATE
     # Keep "picotool load -f" / 1200-baud reset working with our own USB

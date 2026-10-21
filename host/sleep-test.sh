@@ -2,13 +2,13 @@
 # Measure one suspend cycle: how long it slept, what woke it, whether the
 # Pico stayed powered, and how much battery it used.
 #
-#   ./sleep-test.sh deep      # test S3 (needs sudo to switch mode)
-#   ./sleep-test.sh s2idle    # test s2idle, for comparison
-#   ./sleep-test.sh           # test whatever mode is active
-#   ./sleep-test.sh deep 30   # wait 30 s before suspending (close the lid first)
+#   host/sleep-test.sh deep      # test S3 (needs sudo to switch mode)
+#   host/sleep-test.sh s2idle    # test s2idle, for comparison
+#   host/sleep-test.sh           # test whatever mode is active
+#   host/sleep-test.sh deep 30   # wait 30 s before suspending (close the lid first)
 #
 # Unplug the charger first if you want a power number. Wake the laptop
-# remotely (./mac/wake-thinkpad.sh) after a few minutes. Run this from a
+# remotely (client/wake.sh on another machine) after a few minutes. Run this from a
 # local terminal, not over SSH: SSH dies while the laptop sleeps.
 set -euo pipefail
 

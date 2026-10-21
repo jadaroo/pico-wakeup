@@ -38,6 +38,7 @@ the same thing that happens when you press a key on a sleeping laptop.
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
 - [Documentation](#documentation)
+- [License](#license)
 
 ## Hardware and software
 
@@ -216,3 +217,15 @@ Broker errors in detail: [docs/broker-setup.md](docs/broker-setup.md#step-7-if-s
 References: [pico-examples MQTT client](https://github.com/raspberrypi/pico-examples/tree/master/pico_w/wifi/mqtt),
 [TinyUSB HID composite example](https://github.com/raspberrypi/pico-examples/tree/master/usb/device/dev_hid_composite),
 [lwIP MQTT client](https://www.nongnu.org/lwip/2_1_x/group__mqtt.html).
+
+## License
+
+[MIT](LICENSE). Two files in this repository aren't ours:
+
+- **`firmware/pico_sdk_import.cmake`** is copied from the Pico SDK, under
+  BSD-3-Clause © Raspberry Pi (Trading) Ltd. The notice is kept in the file.
+- **`firmware/src/ca_cert.h`** contains DigiCert's public root certificate,
+  which is published for anyone to use.
+
+The firmware links the Pico SDK, lwIP, mbedTLS, TinyUSB and the CYW43 driver
+at build time; each is under its own license in the SDK.

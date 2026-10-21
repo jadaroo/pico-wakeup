@@ -1,6 +1,9 @@
 # pico-wakeup
 
-**Wake a sleeping laptop from anywhere with a Raspberry Pi Pico W.**
+[![Build firmware](https://github.com/jadaroo/pico-wakeup/actions/workflows/build.yml/badge.svg)](https://github.com/jadaroo/pico-wakeup/actions/workflows/build.yml)
+
+**Wake a sleeping laptop from anywhere with a Raspberry Pi Pico W, and put it
+back to sleep.**
 
 The Pico W stays plugged into the laptop and pretends to be a USB keyboard.
 It keeps a TLS connection to a cloud MQTT broker. When you send `wakeup` from
@@ -21,8 +24,14 @@ the same thing that happens when you press a key on a sleeping laptop.
   keyboard wake path the laptop already supports.
 - **Secure.** TLS with certificate and hostname verification, and a separate
   login for each device.
+- **Sleep, too.** `sleep` presses the standard USB "System Sleep" key, so
+  the laptop suspends without any extra software.
+- **Confirms it worked.** The client waits until the laptop is actually awake
+  (or asleep), resends if the Pico missed the command, and returns an exit
+  code, so `./wake.sh && ssh laptop` just works.
 - **Reports its state.** The Pico publishes whether the laptop is asleep or
-  awake, and the broker announces `offline` if the Pico disappears.
+  awake, and the broker announces `offline` if the Pico disappears. Its LED
+  shows the connection state.
 - **Recovers by itself** from Wi-Fi and broker outages, with exponential
   backoff and a watchdog.
 
@@ -60,8 +69,8 @@ pico-wakeup/
 │   ├── secrets.h.example       copy to secrets.h (gitignored)
 │   ├── src/
 │   │   ├── main.c              main loop, Wi-Fi/DNS/MQTT state machine, commands
-│   │   ├── usb_keyboard.c/.h   remote wakeup, key tap, USB suspend tracking
-│   │   ├── usb_descriptors.c   USB serial + keyboard + reset interface
+│   │   ├── usb_keyboard.c/.h   remote wakeup, Sleep key, key tap, USB suspend tracking
+│   │   ├── usb_descriptors.c   USB serial + keyboard + system control + reset
 │   │   └── ca_cert.h           broker CA (DigiCert Global Root G2)
 │   └── config/
 │       ├── lwipopts.h          TCP/IP stack settings
@@ -73,11 +82,15 @@ pico-wakeup/
 ├── host/                       runs on the laptop being woken
 │   ├── swayidle.service        report desktop idle to logind
 │   ├── 20-idle-suspend.conf    auto-suspend when everything is idle
+│   ├── 60-pico-wakeup.rules    let picotool reflash the Pico without sudo
 │   └── sleep-test.sh           measure a sleep cycle: duration, wake source, power
+├── .github/workflows/
+│   └── build.yml               CI: compile the firmware on every push
 └── docs/
     ├── broker-setup.md         EMQX account, deployment and logins, step by step
     ├── host-setup.md           USB power, wakeup checks, sleep modes, auto-suspend
-    └── how-it-works.md         design, firmware walkthrough, MQTT/USB/TLS details
+    ├── how-it-works.md         design, firmware walkthrough, MQTT/USB/TLS details
+    └── testing.md              how to test each feature and recovery path
 ```
 
 ## Setup
@@ -101,7 +114,16 @@ To flash:
 1. **First time:** hold **BOOTSEL** while plugging the Pico into the laptop,
    then run `picotool load -x build/wakeup.uf2`.
 2. **Every time after:** `picotool load -f -x build/wakeup.uf2`. No button
-   needed; the firmware's reset interface lets picotool reboot it.
+   needed; the firmware's reset interface lets picotool reboot it. Without
+   `host/60-pico-wakeup.rules` installed, this needs `sudo`.
+
+The LED shows how far the Pico got:
+
+| LED | Meaning |
+|---|---|
+| slow blink (1 Hz) | joining Wi-Fi |
+| fast blink (4 Hz) | connecting to the broker |
+| steady on | connected (`toggle` switches it off/on) |
 
 Watch the debug output with `minicom -D /dev/ttyACM0` (quit: Ctrl-A, then X).
 A healthy start looks like:
@@ -148,32 +170,48 @@ folder: `scp -r user@laptop:path/to/pico-wakeup/client ~/wakeup-client`.
 ## Usage
 
 ```sh
-./wake.sh             # wake the laptop
-./wake.sh status      # ask for the current status
+./wake.sh             # wake the laptop, wait until it's awake
+./wake.sh sleep       # put the laptop to sleep, wait until it's asleep
+./wake.sh status      # print the current status
 ./wake.sh toggle      # toggle the Pico's LED (a harmless connectivity test)
+
+./wake.sh && ssh user@laptop      # connect as soon as it's up
 ```
 
-The script listens on the status topic for 15 s and prints what the Pico
-reports. The **first line is the retained status**, i.e. the last thing the
-Pico said, which may be old. Lines after it are the live reply:
+The script subscribes to the status topic, sends the command, and prints the
+Pico's live replies until the command has taken effect:
 
 ```
-pico-wakeup/pico/status event=laptop-asleep led=off usb=suspended uptime=4012
-pico-wakeup/pico/status event=wakeup:remote-wakeup-sent led=off usb=suspended uptime=4371
-pico-wakeup/pico/status event=laptop-awake led=off usb=active uptime=4372
+-> wakeup
+<- event=wakeup:remote-wakeup-sent led=on usb=suspended uptime=4371
+<- event=laptop-awake led=on usb=active uptime=4372
+done after 2 s
 ```
+
+If the Pico doesn't answer (e.g. it's reconnecting and missed the message),
+`wakeup` and `sleep` are sent again every 5 s. `toggle` isn't, since that
+would toggle twice. It gives up after 60 s (`WAKE_TIMEOUT=120 ./wake.sh` to
+change).
+
+| Exit status | Meaning |
+|---|---|
+| 0 | done: the laptop is awake / asleep, or the reply arrived |
+| 1 | timeout: no confirmation (Pico offline, broker unreachable) |
+| 2 | the Pico reported a failure (e.g. `remote-wakeup-not-enabled-by-host`) |
+| 64 | unknown command |
 
 | Field | Values |
 |---|---|
-| `event` | `online`, `offline` (Last Will), `laptop-asleep`, `laptop-awake`, `wakeup:<result>`, `toggle`, `status`, `unknown-command` |
+| `event` | `online`, `offline` (Last Will), `laptop-asleep`, `laptop-awake`, `wakeup:<result>`, `sleep:<result>`, `toggle`, `status`, `unknown-command` |
 | `wakeup:<result>` | `remote-wakeup-sent` (laptop was asleep), `key-tap-sent` (laptop was awake), `remote-wakeup-not-enabled-by-host`, `usb-not-mounted` |
+| `sleep:<result>` | `sleep-key-sent`, `already-asleep`, `usb-not-mounted` |
 | `led` | `on`, `off` |
 | `usb` | `active`, `suspended` (laptop asleep), `unmounted` |
 | `uptime` | seconds since the Pico booted |
 
 Topics: commands go to `pico-wakeup/pico/cmd`, status comes back on
-`pico-wakeup/pico/status`. Any MQTT client works, e.g. a phone app with a "wakeup"
-button.
+`pico-wakeup/pico/status` (retained, so a new subscriber immediately gets the last
+one). Any MQTT client works, e.g. a phone app with a "wakeup" button.
 
 ## Troubleshooting
 
@@ -181,7 +219,8 @@ button.
 |---|---|---|
 | `wake.sh` prints `Connection Refused: not authorised` | wrong broker login | Check `client/wakeup.env`; re-add the login in EMQX |
 | `wake.sh` hangs, then times out (no error) | port 8883 blocked on this network (common at universities) | Phone hotspot, or a browser client over WebSockets (`wss://<address>:8084/mqtt`) |
-| `wake.sh` gets only `Timed out`, no status lines | Pico not connected | Check the Pico's serial output |
+| `wake.sh`: `no answer from the Pico` (exit 1) | Pico offline | Check its LED and serial output |
+| `sleep` sends the key but the laptop stays awake | something handles the Sleep key instead of logind | `systemd-inhibit --list` for a `handle-suspend-key` inhibitor; check `HandleSuspendKey` in logind |
 | Serial: `[wifi] ... wrong password` / `SSID not found` | Wi-Fi settings, or a 5 GHz-only network | Fix `secrets.h`; the Pico W is 2.4 GHz only |
 | Serial: `[mqtt] connection failed, status 4` or `5` | wrong Pico login | Fix `MQTT_USERNAME`/`MQTT_PASSWORD` in `secrets.h` |
 | Serial: `[mqtt] connection failed, status 256` | TCP/TLS failed | Check `MQTT_BROKER_HOST` (bare hostname, no `mqtts://`) |
@@ -200,8 +239,11 @@ Broker errors in detail: [docs/broker-setup.md](docs/broker-setup.md#step-7-if-s
   chain and hostname are checked.
 - **If the broker's CA changes**, `firmware/src/ca_cert.h` must be updated
   and the firmware reflashed. DigiCert Global Root G2 is valid until 2038.
-- **Anyone with the client login can wake the laptop.** Use long random
-  passwords; see [broker setup §5](docs/broker-setup.md#step-5-create-the-two-logins).
+- **Anyone with the client login can wake the laptop or put it to sleep.**
+  Use long random passwords and topic permissions; see
+  [broker setup](docs/broker-setup.md#step-8-optional-restrict-each-login-to-its-topics).
+- **The broker doesn't queue commands for an offline Pico.** lwIP's MQTT
+  client always uses a clean session, which is why the client resends.
 
 ## Documentation
 
@@ -211,8 +253,11 @@ Broker errors in detail: [docs/broker-setup.md](docs/broker-setup.md#step-7-if-s
   why `s2idle` and not `deep` (with measurements), the lid, and auto-suspend.
 - **[docs/how-it-works.md](docs/how-it-works.md):** the design explained:
   MQTT features used, the main loop and state machine, lwIP's two incoming
-  callbacks, the locking rules for the poll arch, USB remote wakeup, TLS, and
-  the design decisions.
+  callbacks, the locking rules for the poll arch, USB remote wakeup and the
+  Sleep key, the client's resending, TLS, and the design decisions.
+- **[docs/testing.md](docs/testing.md):** a checklist for every feature, and
+  how to trigger each recovery path (Wi-Fi loss, refused login, dropped
+  connection, missed command, watchdog).
 
 References: [pico-examples MQTT client](https://github.com/raspberrypi/pico-examples/tree/master/pico_w/wifi/mqtt),
 [TinyUSB HID composite example](https://github.com/raspberrypi/pico-examples/tree/master/usb/device/dev_hid_composite),

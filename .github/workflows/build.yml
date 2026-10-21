@@ -1,0 +1,45 @@
+# Compile the firmware on every push and pull request, with the placeholder
+# secrets, to catch build breakage. The resulting .uf2 is not useful to flash
+# (it has no real credentials), so it isn't published.
+name: Build firmware
+
+on:
+  push:
+  pull_request:
+
+env:
+  PICO_SDK_VERSION: "2.3.0"   # keep in sync with the SDK you build with locally
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Check out the Pico SDK ${{ env.PICO_SDK_VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: ${{ env.PICO_SDK_VERSION }}
+          path: pico-sdk
+          submodules: recursive   # lwIP, mbedTLS, TinyUSB, cyw43-driver, ...
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib build-essential pkg-config libusb-1.0-0-dev
+
+      - name: Use the placeholder secrets
+        run: cp firmware/secrets.h.example firmware/secrets.h
+
+      - name: Configure
+        run: cmake -S firmware -B firmware/build -G Ninja -DPICO_SDK_PATH="$GITHUB_WORKSPACE/pico-sdk"
+
+      - name: Build
+        run: cmake --build firmware/build
+
+      - name: Report size
+        run: arm-none-eabi-size firmware/build/wakeup.elf

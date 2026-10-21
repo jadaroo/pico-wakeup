@@ -10,6 +10,8 @@ A walk through the design and the firmware, written for learning. Back to the
 - [Receiving a message: lwIP's two callbacks](#receiving-a-message-lwips-two-callbacks)
 - [Locking rules: why `pico_cyw43_arch_lwip_poll`](#locking-rules-why-pico_cyw43_arch_lwip_poll)
 - [Waking the laptop over USB](#waking-the-laptop-over-usb)
+- [The client: confirmation and resending](#the-client-confirmation-and-resending)
+- [The LED](#the-led)
 - [TLS](#tls)
 - [Configuration headers](#configuration-headers)
 - [Design decisions](#design-decisions)
@@ -62,8 +64,8 @@ everyone subscribed to that topic.
 | File | Role |
 |---|---|
 | `firmware/src/main.c` | Main loop, connection state machine, MQTT callbacks, command handling |
-| `firmware/src/usb_keyboard.c/.h` | Remote wakeup, Shift tap, USB suspend/resume tracking |
-| `firmware/src/usb_descriptors.c` | What the Pico tells the laptop it is (serial port + keyboard + reset interface) |
+| `firmware/src/usb_keyboard.c/.h` | Remote wakeup, Sleep key, Shift tap, USB suspend/resume tracking |
+| `firmware/src/usb_descriptors.c` | What the Pico tells the laptop it is (serial port + keyboard + system control + reset interface) |
 | `firmware/src/ca_cert.h` | DigiCert Global Root G2, the CA used to verify the broker |
 | `firmware/config/lwipopts.h` | lwIP TCP/IP stack options |
 | `firmware/config/mbedtls_config.h` | mbedTLS options: a TLS 1.2 client only |
@@ -161,7 +163,8 @@ logged).
 | Payload on `pico-wakeup/pico/cmd` | Action |
 |---|---|
 | `wakeup` | `usb_keyboard_wake()`, then publish the result |
-| `toggle` | toggle the Pico's LED |
+| `sleep` | `usb_keyboard_sleep()`: press the HID "System Sleep" key |
+| `toggle` | toggle the LED setting (shown while connected) |
 | `status` | publish the current status |
 | anything else | publish `event=unknown-command` |
 
@@ -201,7 +204,8 @@ The Pico is a USB **composite device**, with several functions on one cable:
 |---|---|---|
 | 0–1 | CDC ACM (serial) | debug `printf()` → `/dev/ttyACM0` |
 | 2 | HID boot keyboard | wakeup + Shift tap |
-| 3 | Raspberry Pi reset | lets `picotool load -f` reboot the Pico into BOOTSEL |
+| 3 | HID system control | the "System Sleep" key (`sleep` command) |
+| 4 | Raspberry Pi reset | lets `picotool load -f` reboot the Pico into BOOTSEL |
 
 The SDK's default USB setup only has the serial port. Linking `tinyusb_device`
 ourselves means we provide the descriptors, call `tusb_init()` and run
@@ -225,9 +229,54 @@ How waking works:
    (two reports, paced by `tud_hid_ready()`), so the screen turns on too.
 5. If the laptop is already awake, `wakeup` just sends the Shift tap.
 
+Sleeping works the other way round. HID's Generic Desktop page has a
+**System Control** collection with Power Down (1), Sleep (2) and Wake Up (3).
+The Pico sends a 1-byte report `2` ("Sleep pressed"), then `0` ("released"),
+on its own HID interface (instance 1). Linux turns that into `KEY_SLEEP`,
+and logind suspends.
+
+It's a separate interface rather than part of the keyboard because a
+boot-protocol keyboard must have exactly the fixed 8-byte boot report, with
+no report IDs. That boot-keyboard identity is what makes Linux enable remote
+wakeup by default, so the keyboard interface is kept plain.
+
 Security: the Pico could type anything, so commands are fixed actions. Never
 make it type text received over MQTT. That would turn your MQTT password into
 a remote keyboard on your laptop.
+
+## The client: confirmation and resending
+
+lwIP's MQTT client always connects with **clean session** set
+(`mqtt.c` sets `MQTT_CONNECT_FLAG_CLEAN_SESSION` unconditionally). The
+broker therefore keeps no queue for the Pico, and a command published while
+the Pico is reconnecting is simply dropped, even at QoS 1.
+
+`client/wake.sh` handles this on the sending side:
+
+1. **Subscribe first**, with `-R` to skip the retained status. Only live
+   replies count, so an old `laptop-awake` can't fool it.
+2. **Publish the command.**
+3. **Resend `wakeup`/`sleep` every 5 s until the Pico answers at all.**
+   Resending is harmless: a second `wakeup` on an awake laptop is just a
+   Shift tap, and a second `sleep` on a sleeping one reports
+   `already-asleep`. `toggle` is never resent.
+4. **Wait for the event that means "done"** (`laptop-awake`,
+   `laptop-asleep`, ...) and exit 0. A failure event exits 2; no
+   confirmation within the timeout exits 1.
+
+## The LED
+
+`led_task()` runs every loop and derives the LED from the state machine:
+
+| LED | State |
+|---|---|
+| slow blink (1 Hz) | `WIFI_START`, `WIFI_WAIT`, or backing off before a Wi-Fi retry |
+| fast blink (4 Hz) | DNS, MQTT connect, or backing off before a broker retry |
+| steady | `MQTT_UP`: shows the `led_on` setting, which `toggle` flips |
+
+The LED is wired to the CYW43 Wi-Fi chip, not to an RP2040 pin, so every
+change is an SPI transaction. `led_task()` only writes when the wanted value
+changes.
 
 ## TLS
 

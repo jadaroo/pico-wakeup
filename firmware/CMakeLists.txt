@@ -8,6 +8,8 @@ include(pico_sdk_import.cmake)
 
 project(wakeup C CXX ASM)
 set(CMAKE_C_STANDARD 11)
+# build/compile_commands.json lets clangd (editor) find the SDK headers
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 pico_sdk_init()
 

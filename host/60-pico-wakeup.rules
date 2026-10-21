@@ -1,0 +1,7 @@
+# Let the logged-in user open the Pico's reset interface, so that
+# "picotool load -f" can reboot the running firmware into BOOTSEL without sudo.
+# (In BOOTSEL mode the Pico is 2e8a:0003, which picotool's own rules cover.)
+#
+# Install: sudo install -m 644 host/60-pico-wakeup.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4012", TAG+="uaccess"

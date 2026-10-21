@@ -17,7 +17,7 @@
 
 // Classes
 #define CFG_TUD_CDC             1       // serial port for printf()
-#define CFG_TUD_HID             1       // keyboard for waking the laptop
+#define CFG_TUD_HID             2       // 0: boot keyboard (wake), 1: system control (sleep)
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0
 #define CFG_TUD_VENDOR          0
@@ -27,7 +27,7 @@
 #define CFG_TUD_CDC_TX_BUFSIZE  256
 #define CFG_TUD_CDC_EP_BUFSIZE  64
 
-// A boot keyboard report is 8 bytes
+// A boot keyboard report is 8 bytes, a system control report 1 byte
 #define CFG_TUD_HID_EP_BUFSIZE  16
 
 #endif

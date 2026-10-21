@@ -135,7 +135,37 @@ systemd-inhibit --what=idle --why="long build" <command>
 | desktop idle time | `idlehint 300` in `~/.config/systemd/user/swayidle.service` |
 | delay before suspending | `IdleActionSec` in `/etc/systemd/logind.conf.d/20-idle-suspend.conf` |
 
-## 6. Remote access after waking
+## 6. Remote sleep (`wake.sh sleep`)
+
+The Pico has a second HID interface with the standard "System Sleep" key.
+Linux maps it to `KEY_SLEEP`, and logind handles that with
+`HandleSuspendKey=suspend` (the default). No setup is needed. To check that
+nothing else has taken over the key:
+
+```fish
+busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager HandleSuspendKey     # -> s "suspend"
+systemd-inhibit --list | grep handle-suspend-key        # should print nothing
+```
+
+On this machine niri only takes over the *power* key
+(`handle-power-key`), so the Sleep key reaches logind.
+
+## 7. Reflash the Pico without sudo (optional)
+
+`picotool load -f` reboots the running firmware into BOOTSEL through its
+reset interface. The Pico's USB device node is root-only by default, so that
+needs `sudo`. This udev rule gives the logged-in user access instead:
+
+```fish
+sudo install -m 644 host/60-pico-wakeup.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+```
+
+The `uaccess` tag means "the user at the local seat may use this device".
+It only works in rules numbered below 73, hence `60-`.
+
+## 8. Remote access after waking
 
 Waking only helps if you can then reach the laptop. Use Tailscale and SSH to
 its Tailscale IP. Tailscale reconnects a few seconds after resume:

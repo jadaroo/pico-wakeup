@@ -2,7 +2,8 @@
 //
 // Stays plugged into the ThinkPad. Connects to home Wi-Fi and to a cloud MQTT
 // broker over TLS, listens on TOPIC_CMD, and on "wakeup" wakes the ThinkPad
-// via USB remote wakeup (it presents itself as a USB keyboard).
+// via USB remote wakeup (it presents itself as a USB keyboard). On "sleep" it
+// presses the HID "System Sleep" key, which suspends the laptop.
 //
 // Everything runs from one loop in main(): TinyUSB (tud_task), the Wi-Fi
 // driver + lwIP (cyw43_arch_poll), and the connection state machine
@@ -75,7 +76,8 @@ static bool mqtt_event_pending;
 static mqtt_connection_status_t mqtt_event_status;
 static bool subscribe_failed;
 
-static bool led_on;
+// User LED setting, flipped by "toggle". Shown once connected (see led_task()).
+static bool led_on = true;
 
 // Incoming message being assembled from the two lwIP callbacks
 static char rx_topic[64];
@@ -125,10 +127,11 @@ static void publish_status(const char *event) {
         return;
     }
     char msg[128];
-    int len = snprintf(msg, sizeof(msg), "event=%s led=%s usb=%s uptime=%lu",
+    // 64-bit microseconds: to_ms_since_boot() is 32-bit and wraps after 49.7 days
+    int len = snprintf(msg, sizeof(msg), "event=%s led=%s usb=%s uptime=%llu",
                        event, led_on ? "on" : "off",
                        usb_host_state_str(usb_keyboard_host_state()),
-                       (unsigned long)(to_ms_since_boot(get_absolute_time()) / 1000));
+                       (unsigned long long)(to_us_since_boot(get_absolute_time()) / 1000000));
     err_t err = mqtt_publish(mqtt_client, TOPIC_STATUS, msg, (u16_t)len,
                              1 /* QoS */, 1 /* retain */, pub_request_cb, NULL);
     if (err == ERR_OK) {
@@ -141,8 +144,31 @@ static void publish_status(const char *event) {
 // ---- Incoming messages -----------------------------------------------------------
 
 static void set_led(bool on) {
-    led_on = on;
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
+    led_on = on;    // applied by led_task()
+}
+
+// The LED shows the connection state, so you can tell what's wrong without
+// a serial terminal:
+//   slow blink (1 Hz)   joining Wi-Fi
+//   fast blink (4 Hz)   resolving / connecting to the broker
+//   steady              connected: on, or off after "toggle"
+// The LED sits on the Wi-Fi chip, so each change is an SPI transaction;
+// only write it when the wanted state changes.
+static void led_task(void) {
+    static int written = -1;
+    bool want;
+    if (net_state == NET_MQTT_UP) {
+        want = led_on;
+    } else {
+        bool joining_wifi = net_state == NET_WIFI_START || net_state == NET_WIFI_WAIT ||
+                            (net_state == NET_BACKOFF && retry_state == NET_WIFI_START);
+        uint64_t half_period_ms = joining_wifi ? 500 : 125;
+        want = (to_us_since_boot(get_absolute_time()) / 1000 / half_period_ms) % 2;
+    }
+    if ((int)want != written) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, want);
+        written = want;
+    }
 }
 
 // Called once per complete message. topic and payload are NUL-terminated.
@@ -165,6 +191,14 @@ static void handle_message(const char *topic, char *payload) {
         LOG("[wake] %s\n", usb_wake_result_str(result));
         char event[64];
         snprintf(event, sizeof(event), "wakeup:%s", usb_wake_result_str(result));
+        publish_status(event);
+    } else if (strcmp(payload, "sleep") == 0) {
+        // The laptop suspends right after this; its "laptop-asleep" status
+        // follows from tud_suspend_cb().
+        usb_sleep_result_t result = usb_keyboard_sleep();
+        LOG("[sleep] %s\n", usb_sleep_result_str(result));
+        char event[64];
+        snprintf(event, sizeof(event), "sleep:%s", usb_sleep_result_str(result));
         publish_status(event);
     } else if (strcmp(payload, "toggle") == 0) {
         set_led(!led_on);
@@ -424,7 +458,6 @@ int main(void) {
         panic("cyw43_arch_init failed");
     }
     cyw43_arch_enable_sta_mode();
-    set_led(false);
 
     // We own TinyUSB, so we start it; stdio_init_all() then attaches printf()
     // to the CDC interface.
@@ -453,6 +486,7 @@ int main(void) {
         cyw43_arch_poll();          // Wi-Fi driver + lwIP: runs all network callbacks
         usb_keyboard_task();        // send queued key reports
         net_task();                 // connection state machine
+        led_task();                 // LED shows the connection state
 
         if (usb_keyboard_state_changed()) {
             usb_host_state_t s = usb_keyboard_host_state();

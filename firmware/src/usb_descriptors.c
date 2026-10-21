@@ -1,7 +1,8 @@
 // USB descriptors: what the Pico tells the laptop it is.
 //   Interface 0+1: CDC ACM serial port (/dev/ttyACM0) for debug printf()
 //   Interface 2:   HID boot keyboard, used to wake the laptop
-//   Interface 3:   Raspberry Pi reset interface (picotool load -f, reboot)
+//   Interface 3:   HID system control (the "Sleep" key), used to suspend it
+//   Interface 4:   Raspberry Pi reset interface (picotool load -f, reboot)
 // Based on pico-sdk/src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c and
 // pico-examples/usb/device/dev_hid_composite/usb_descriptors.c.
 #include <string.h>
@@ -19,6 +20,7 @@ enum {
     ITF_NUM_CDC = 0,
     ITF_NUM_CDC_DATA,
     ITF_NUM_HID,
+    ITF_NUM_HID_SYS,
     ITF_NUM_RESET,
     ITF_NUM_TOTAL
 };
@@ -30,6 +32,7 @@ enum {
     STR_SERIAL,
     STR_CDC,
     STR_HID,
+    STR_HID_SYS,
     STR_RESET,
 };
 
@@ -37,6 +40,7 @@ enum {
 #define EPNUM_CDC_OUT       0x02
 #define EPNUM_CDC_IN        0x82
 #define EPNUM_HID           0x83
+#define EPNUM_HID_SYS       0x84
 
 // ---- Device descriptor --------------------------------------------------------
 
@@ -63,23 +67,31 @@ const uint8_t *tud_descriptor_device_cb(void) {
     return (const uint8_t *)&desc_device;
 }
 
-// ---- HID report descriptor ----------------------------------------------------
+// ---- HID report descriptors ---------------------------------------------------
 
-// Standard 8-byte boot keyboard report: modifiers, reserved, 6 keycodes.
-// No report ID, as the boot protocol requires.
-static const uint8_t desc_hid_report[] = {
+// HID instance numbers follow the order of the HID interfaces below.
+// Instance 0: standard 8-byte boot keyboard report (modifiers, reserved,
+// 6 keycodes). No report ID, as the boot protocol requires.
+static const uint8_t desc_hid_keyboard_report[] = {
     TUD_HID_REPORT_DESC_KEYBOARD()
 };
 
+// Instance 1: 1-byte system control report. Value 1 = Power Down,
+// 2 = Sleep, 3 = Wake Up, 0 = nothing pressed. Linux maps Sleep to
+// KEY_SLEEP, which logind handles with HandleSuspendKey=suspend.
+// Kept on its own interface so the keyboard stays a plain boot keyboard.
+static const uint8_t desc_hid_system_report[] = {
+    TUD_HID_REPORT_DESC_SYSTEM_CONTROL()
+};
+
 const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
-    (void)instance;
-    return desc_hid_report;
+    return instance == 0 ? desc_hid_keyboard_report : desc_hid_system_report;
 }
 
 // ---- Configuration descriptor -------------------------------------------------
 
 #define CONFIG_TOTAL_LEN \
-    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
+    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + 2 * TUD_HID_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
 
 static const uint8_t desc_configuration[] = {
     // REMOTE_WAKEUP tells the host this device may wake it from suspend.
@@ -94,7 +106,11 @@ static const uint8_t desc_configuration[] = {
     // Boot-protocol keyboard. Linux enables wakeup by default for these
     // (usbhid sets power/wakeup=enabled for boot keyboards).
     TUD_HID_DESCRIPTOR(ITF_NUM_HID, STR_HID, HID_ITF_PROTOCOL_KEYBOARD,
-                       sizeof(desc_hid_report), EPNUM_HID,
+                       sizeof(desc_hid_keyboard_report), EPNUM_HID,
+                       CFG_TUD_HID_EP_BUFSIZE, 10),
+
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID_SYS, STR_HID_SYS, HID_ITF_PROTOCOL_NONE,
+                       sizeof(desc_hid_system_report), EPNUM_HID_SYS,
                        CFG_TUD_HID_EP_BUFSIZE, 10),
 
     TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, STR_RESET),
@@ -115,6 +131,7 @@ static const char *const string_desc[] = {
     [STR_SERIAL]       = serial_str,
     [STR_CDC]          = "Pico W Wakeup Debug",
     [STR_HID]          = "Pico W Wakeup Keyboard",
+    [STR_HID_SYS]      = "Pico W Wakeup System Control",
     [STR_RESET]        = "Reset",
 };
 

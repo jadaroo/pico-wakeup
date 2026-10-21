@@ -122,6 +122,41 @@ On the Pico's serial output, the same problems show up as:
 - `status 256`: TCP/TLS failed
 - `[dns] dns lookup failed`: wrong address.
 
+## Step 8 (optional): Restrict each login to its topics
+
+By default every login may publish and subscribe to any topic. Each login
+only needs two things, so allow exactly those. Then a leaked login can do
+much less: for example, someone with the Pico's login (it's stored in the
+Pico's flash) couldn't send commands.
+
+| Login | Publish | Subscribe |
+|---|---|---|
+| `pico` | `pico-wakeup/pico/status` | `pico-wakeup/pico/cmd` |
+| `mac`  | `pico-wakeup/pico/cmd` | `pico-wakeup/pico/status` |
+
+1. In the deployment's left menu, open **Access Control** → **Authorization**.
+2. Add the four **allow** rules from the table: each with a username, a topic,
+   and an action of publish or subscribe.
+3. Add a **deny** rule for **all users** on topic `#` with action **all**,
+   *after* the allow rules. Rules are checked in order and the first match
+   wins, so this denies everything not explicitly allowed. If the console
+   instead has a "no match" default setting, set it to **deny**.
+
+Check it still works, then check that something is refused:
+
+```fish
+./client/wake.sh status            # must still print "done"
+ mosquitto_sub -h <address> -p 8883 --tls-use-os-certs -u mac -P '...' -t pico-wakeup/pico/cmd -d
+```
+
+The second command subscribes to a topic `mac` isn't allowed to read. With
+`-d` you'll see the broker's `SUBACK` with a failure code (`128`) instead of
+`1`. If `wake.sh` stops working, the Pico's serial log shows
+`subscribe failed`: re-check the `pico` rules.
+
+The Pico's Last Will (`event=offline`) is also published to
+`pico-wakeup/pico/status`, so the `pico` publish rule covers it.
+
 ## University / public networks
 
 Some campus networks block outgoing port 8883. The Pico is on your home Wi-Fi,

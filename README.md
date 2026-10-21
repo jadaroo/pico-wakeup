@@ -66,6 +66,7 @@ pico-wakeup/
 ├── firmware/                   runs on the Pico W
 │   ├── CMakeLists.txt
 │   ├── pico_sdk_import.cmake
+│   ├── flash.sh                flash without pressing BOOTSEL
 │   ├── secrets.h.example       copy to secrets.h (gitignored)
 │   ├── src/
 │   │   ├── main.c              main loop, Wi-Fi/DNS/MQTT state machine, commands
@@ -112,17 +113,19 @@ cmake --build build
 
 To flash:
 1. **First time:** hold **BOOTSEL** while plugging the Pico into the laptop,
-   then run `picotool load -x build/wakeup.uf2`.
-2. **Every time after:** `picotool load -f -x build/wakeup.uf2`. No button
-   needed; the firmware's reset interface lets picotool reboot it. Without
-   `host/60-pico-wakeup.rules` installed, this needs `sudo`.
+   then run `sudo ./flash.sh`.
+2. **Every time after:** just `sudo ./flash.sh`. No button needed: it uses
+   the firmware's reset interface to reboot the Pico into BOOTSEL. It passes
+   `--vid 0xcafe --pid 0x4012` because picotool only looks for Raspberry Pi's
+   own USB ID by default. With `host/60-pico-wakeup.rules` installed, you can
+   drop the `sudo`.
 
 The LED shows how far the Pico got:
 
 | LED | Meaning |
 |---|---|
-| slow blink (1 Hz) | joining Wi-Fi |
-| fast blink (4 Hz) | connecting to the broker |
+| off | no Wi-Fi yet (joining) |
+| fast blink (4 Hz) | Wi-Fi up, connecting to the broker |
 | steady on | connected (`toggle` switches it off/on) |
 
 Watch the debug output with `minicom -D /dev/ttyACM0` (quit: Ctrl-A, then X).
@@ -134,9 +137,9 @@ A healthy start looks like:
 [wifi] connected, IP 192.168.1.57
 [dns] xxxxxxxx.ala.eu-central-1.emqxsl.com -> 3.120.x.x
 [mqtt] connecting to xxxxxxxx.ala.eu-central-1.emqxsl.com (3.120.x.x:8883, TLS) as pico-1a2b
-[mqtt] connected
+[mqtt] connected after 913 ms (longest step so far 859 ms)
+[mqtt] -> pico-wakeup/pico/status: event=online connect-ms=913 longest-step-ms=859 reset=reboot led=on usb=active uptime=8
 [mqtt] subscribed to pico-wakeup/pico/cmd
-[mqtt] -> pico-wakeup/pico/status: event=online led=off usb=active uptime=9
 ```
 
 ### 3. Host (the laptop)
@@ -208,6 +211,8 @@ change).
 | `led` | `on`, `off` |
 | `usb` | `active`, `suspended` (laptop asleep), `unmounted` |
 | `uptime` | seconds since the Pico booted |
+| `connect-ms`, `longest-step-ms` | (`online` only) how long TCP + TLS + MQTT took, and the longest the main loop blocked |
+| `reset` | (`online` only) why the Pico last restarted: `power-on`, `reboot` (e.g. flashing), `watchdog-timeout` (it hung; then also `hung-in=<state>/<step>`), `run-pin` |
 
 Topics: commands go to `pico-wakeup/pico/cmd`, status comes back on
 `pico-wakeup/pico/status` (retained, so a new subscriber immediately gets the last
@@ -220,6 +225,8 @@ one). Any MQTT client works, e.g. a phone app with a "wakeup" button.
 | `wake.sh` prints `Connection Refused: not authorised` | wrong broker login | Check `client/wakeup.env`; re-add the login in EMQX |
 | `wake.sh` hangs, then times out (no error) | port 8883 blocked on this network (common at universities) | Phone hotspot, or a browser client over WebSockets (`wss://<address>:8084/mqtt`) |
 | `wake.sh`: `no answer from the Pico` (exit 1) | Pico offline | Check its LED and serial output |
+| Status shows `reset=watchdog-timeout` | the firmware hung | `hung-in=` names the state and loop step; see [diagnostics](docs/how-it-works.md#diagnostics) |
+| `picotool` says no device found | it only looks for Raspberry Pi's USB ID | Use `firmware/flash.sh` (passes `--vid`/`--pid`) |
 | `sleep` sends the key but the laptop stays awake | something handles the Sleep key instead of logind | `systemd-inhibit --list` for a `handle-suspend-key` inhibitor; check `HandleSuspendKey` in logind |
 | Serial: `[wifi] ... wrong password` / `SSID not found` | Wi-Fi settings, or a 5 GHz-only network | Fix `secrets.h`; the Pico W is 2.4 GHz only |
 | Serial: `[mqtt] connection failed, status 4` or `5` | wrong Pico login | Fix `MQTT_USERNAME`/`MQTT_PASSWORD` in `secrets.h` |

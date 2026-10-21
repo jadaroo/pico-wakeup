@@ -153,9 +153,11 @@ On this machine niri only takes over the *power* key
 
 ## 7. Reflash the Pico without sudo (optional)
 
-`picotool load -f` reboots the running firmware into BOOTSEL through its
-reset interface. The Pico's USB device node is root-only by default, so that
-needs `sudo`. This udev rule gives the logged-in user access instead:
+`firmware/flash.sh` reboots the running firmware into BOOTSEL through its
+reset interface, using `picotool load -f --vid 0xcafe --pid 0x4012`.
+picotool needs the IDs because it only looks for Raspberry Pi's own vendor
+ID by default. The Pico's USB device node is root-only by default, so this
+needs `sudo`. The udev rule below gives the logged-in user access instead:
 
 ```fish
 sudo install -m 644 host/60-pico-wakeup.rules /etc/udev/rules.d/

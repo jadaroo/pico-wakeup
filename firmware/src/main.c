@@ -19,6 +19,7 @@
 #include "pico/cyw43_arch.h"
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
+#include "hardware/structs/vreg_and_chip_reset.h"
 #include "tusb.h"
 
 #include "lwip/altcp_tls.h"
@@ -75,6 +76,7 @@ static char client_id[24];
 static bool mqtt_event_pending;
 static mqtt_connection_status_t mqtt_event_status;
 static bool subscribe_failed;
+static absolute_time_t connect_started;     // for measuring TCP + TLS + CONNACK
 
 // User LED setting, flipped by "toggle". Shown once connected (see led_task()).
 static bool led_on = true;
@@ -111,6 +113,108 @@ static void retry_later(net_state_t next, const char *why) {
     net_state = NET_BACKOFF;
 }
 
+// ---- Diagnostics ---------------------------------------------------------------
+//
+// Measures how long each main-loop step blocks, and remembers across a
+// watchdog reset what the firmware was doing when it hung. Watchdog scratch
+// registers 0-3 survive a watchdog reset (not a power cycle); the SDK and
+// bootrom use 4-7.
+
+typedef enum { STEP_IDLE, STEP_USB, STEP_POLL, STEP_NET, STEP_KBD, STEP_LED, STEP_STATUS, STEP_WAIT } step_t;
+
+#define DIAG_MAGIC      0xD1A90000u
+#define DIAG_NET_STATE  0   // DIAG_MAGIC | net_state, updated every loop
+#define DIAG_STEP       1   // DIAG_MAGIC | step running right now
+#define DIAG_LONGEST    2   // (step << 24) | longest completed step this boot, in ms
+
+static uint32_t longest_step_ms;
+static char reset_info[96] = "";    // appended to the "online" status
+
+static const char *step_str(uint32_t step) {
+    switch (step) {
+        case STEP_USB:  return "usb";
+        case STEP_POLL: return "poll";
+        case STEP_NET:  return "net";
+        case STEP_KBD:  return "kbd";
+        case STEP_LED:  return "led";
+        case STEP_STATUS: return "status";
+        case STEP_WAIT: return "wait";
+        default:        return "idle";
+    }
+}
+
+static const char *net_state_str(uint32_t state) {
+    switch (state) {
+        case NET_WIFI_START: return "wifi-start";
+        case NET_WIFI_WAIT:  return "wifi-wait";
+        case NET_DNS_WAIT:   return "dns-wait";
+        case NET_MQTT_WAIT:  return "mqtt-wait";
+        case NET_MQTT_UP:    return "mqtt-up";
+        case NET_BACKOFF:    return "backoff";
+        default:             return "?";
+    }
+}
+
+// Run one main-loop step, recording it as "in progress" (survives a reset)
+// and its duration.
+#define TIMED_STEP(step, call) do {                                         \
+        watchdog_hw->scratch[DIAG_STEP] = DIAG_MAGIC | (step);              \
+        uint64_t t0_ = time_us_64();                                        \
+        call;                                                               \
+        note_step_time((step), (uint32_t)((time_us_64() - t0_) / 1000));    \
+        watchdog_hw->scratch[DIAG_STEP] = DIAG_MAGIC | STEP_IDLE;           \
+    } while (0)
+
+static void note_step_time(step_t step, uint32_t ms) {
+    if (ms > longest_step_ms) {
+        longest_step_ms = ms;
+        watchdog_hw->scratch[DIAG_LONGEST] = ((uint32_t)step << 24) | (ms & 0xFFFFFF);
+    }
+    if (ms >= 1000) {
+        LOG("[diag] %s step blocked for %lu ms (state %s)\n",
+            step_str(step), (unsigned long)ms, net_state_str(net_state));
+    }
+}
+
+// Why the chip last reset. The RP2040 has no separate brown-out flag: a
+// supply dip below ~1 V on the core shows up as "power-on".
+static const char *reset_cause(void) {
+    if (watchdog_hw->reason & WATCHDOG_REASON_TIMER_BITS) {
+        // watchdog_reboot() (e.g. picotool's reset) also fires the timer; only
+        // watchdog_enable() sets the marker that watchdog_enable_caused_reboot() checks.
+        return watchdog_enable_caused_reboot() ? "watchdog-timeout" : "reboot";
+    }
+    if (watchdog_hw->reason & WATCHDOG_REASON_FORCE_BITS) {
+        return "reboot";
+    }
+    uint32_t chip = vreg_and_chip_reset_hw->chip_reset;
+    if (chip & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_PSM_RESTART_BITS) return "debugger";
+    if (chip & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_RUN_BITS)         return "run-pin";
+    if (chip & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_POR_BITS)         return "power-on";
+    return "unknown";
+}
+
+// Call once at boot, before the watchdog is enabled.
+static void diag_boot(void) {
+    uint32_t state = watchdog_hw->scratch[DIAG_NET_STATE];
+    uint32_t step = watchdog_hw->scratch[DIAG_STEP];
+    uint32_t longest = watchdog_hw->scratch[DIAG_LONGEST];
+    const char *cause = reset_cause();
+
+    int n = snprintf(reset_info, sizeof(reset_info), " reset=%s", cause);
+    if (strcmp(cause, "watchdog-timeout") == 0 && (state & 0xFFFF0000u) == DIAG_MAGIC) {
+        snprintf(reset_info + n, sizeof(reset_info) - n,
+                 " hung-in=%s/%s prev-longest-ms=%lu(%s)",
+                 net_state_str(state & 0xFFFF), step_str(step & 0xFFFF),
+                 (unsigned long)(longest & 0xFFFFFF), step_str(longest >> 24));
+    }
+    LOG("[boot]%s\n", reset_info);
+
+    watchdog_hw->scratch[DIAG_NET_STATE] = DIAG_MAGIC | NET_WIFI_START;
+    watchdog_hw->scratch[DIAG_STEP] = DIAG_MAGIC | STEP_IDLE;
+    watchdog_hw->scratch[DIAG_LONGEST] = 0;
+}
+
 // ---- Publishing status ---------------------------------------------------------
 
 static void pub_request_cb(void *arg, err_t err) {
@@ -126,7 +230,7 @@ static void publish_status(const char *event) {
     if (net_state != NET_MQTT_UP) {
         return;
     }
-    char msg[128];
+    char msg[256];
     // 64-bit microseconds: to_ms_since_boot() is 32-bit and wraps after 49.7 days
     int len = snprintf(msg, sizeof(msg), "event=%s led=%s usb=%s uptime=%llu",
                        event, led_on ? "on" : "off",
@@ -149,21 +253,26 @@ static void set_led(bool on) {
 
 // The LED shows the connection state, so you can tell what's wrong without
 // a serial terminal:
-//   slow blink (1 Hz)   joining Wi-Fi
-//   fast blink (4 Hz)   resolving / connecting to the broker
+//   off                 no Wi-Fi yet (joining)
+//   fast blink (4 Hz)   Wi-Fi up, connecting to the broker
 //   steady              connected: on, or off after "toggle"
-// The LED sits on the Wi-Fi chip, so each change is an SPI transaction;
-// only write it when the wanted state changes.
+//
+// The LED sits on the CYW43 Wi-Fi chip, so each change is a command to that
+// chip. Writing it while the chip is joining a network hangs the driver (seen
+// as watchdog resets reporting hung-in=wifi-wait/led), so during the join we
+// don't touch it at all. Otherwise only write when the wanted state changes.
 static void led_task(void) {
     static int written = -1;
+    if (net_state == NET_WIFI_START || net_state == NET_WIFI_WAIT) {
+        return;
+    }
     bool want;
     if (net_state == NET_MQTT_UP) {
         want = led_on;
+    } else if (net_state == NET_BACKOFF && retry_state == NET_WIFI_START) {
+        want = false;   // about to rejoin Wi-Fi: the chip is idle now, go dark
     } else {
-        bool joining_wifi = net_state == NET_WIFI_START || net_state == NET_WIFI_WAIT ||
-                            (net_state == NET_BACKOFF && retry_state == NET_WIFI_START);
-        uint64_t half_period_ms = joining_wifi ? 500 : 125;
-        want = (to_us_since_boot(get_absolute_time()) / 1000 / half_period_ms) % 2;
+        want = (to_us_since_boot(get_absolute_time()) / 1000 / 125) % 2;
     }
     if ((int)want != written) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, want);
@@ -280,6 +389,7 @@ static void mqtt_start_connect(void) {
 
     mqtt_event_pending = false;
     subscribe_failed = false;
+    connect_started = get_absolute_time();
     deadline = make_timeout_time_ms(MQTT_CONNECT_TIMEOUT_MS);
     net_state = NET_MQTT_WAIT;
 }
@@ -375,11 +485,18 @@ static void net_task(void) {
         if (mqtt_event_pending) {
             mqtt_event_pending = false;
             if (mqtt_event_status == MQTT_CONNECT_ACCEPTED) {
-                LOG("[mqtt] connected\n");
+                uint32_t connect_ms = (uint32_t)(absolute_time_diff_us(
+                    connect_started, get_absolute_time()) / 1000);
+                LOG("[mqtt] connected after %lu ms (longest step so far %lu ms)\n",
+                    (unsigned long)connect_ms, (unsigned long)longest_step_ms);
                 backoff_ms = BACKOFF_MIN_MS;    // success: reset the backoff
                 net_state = NET_MQTT_UP;
                 mqtt_subscribe(mqtt_client, TOPIC_CMD, 1, sub_request_cb, NULL);
-                publish_status("online");
+                char event[160];
+                snprintf(event, sizeof(event), "online connect-ms=%lu longest-step-ms=%lu%s",
+                         (unsigned long)connect_ms, (unsigned long)longest_step_ms, reset_info);
+                publish_status(event);
+                reset_info[0] = '\0';      // report it once
             } else {
                 // e.g. MQTT_CONNECT_REFUSED_NOT_AUTHORIZED_ (5) = bad credentials,
                 // MQTT_CONNECT_DISCONNECTED (256) = TCP/TLS failed
@@ -472,9 +589,7 @@ int main(void) {
     }
 
     LOG("\n=== Pico W wakeup ===\n");
-    if (watchdog_caused_reboot()) {
-        LOG("[boot] previous run was reset by the watchdog\n");
-    }
+    diag_boot();
     mqtt_setup();
     LOG("[boot] client id %s, command topic %s\n", client_id, TOPIC_CMD);
 
@@ -482,19 +597,21 @@ int main(void) {
 
     for (;;) {
         watchdog_update();
-        tud_task();                 // USB: enumeration, serial, keyboard
-        cyw43_arch_poll();          // Wi-Fi driver + lwIP: runs all network callbacks
-        usb_keyboard_task();        // send queued key reports
-        net_task();                 // connection state machine
-        led_task();                 // LED shows the connection state
+        watchdog_hw->scratch[DIAG_NET_STATE] = DIAG_MAGIC | net_state;
+        TIMED_STEP(STEP_USB, tud_task());           // USB: enumeration, serial, keyboard
+        TIMED_STEP(STEP_POLL, cyw43_arch_poll());   // Wi-Fi + lwIP: runs all network callbacks
+        TIMED_STEP(STEP_KBD, usb_keyboard_task());  // send queued key reports
+        TIMED_STEP(STEP_NET, net_task());           // connection state machine
+        TIMED_STEP(STEP_LED, led_task());           // LED shows the connection state
 
         if (usb_keyboard_state_changed()) {
             usb_host_state_t s = usb_keyboard_host_state();
-            LOG("[usb] host %s\n", usb_host_state_str(s));
-            publish_status(s == USB_HOST_SUSPENDED ? "laptop-asleep" : "laptop-awake");
+            TIMED_STEP(STEP_STATUS,
+                LOG("[usb] host %s\n", usb_host_state_str(s));
+                publish_status(s == USB_HOST_SUSPENDED ? "laptop-asleep" : "laptop-awake"));
         }
 
         // Sleep until an interrupt (USB, Wi-Fi) or 1 ms passes.
-        cyw43_arch_wait_for_work_until(make_timeout_time_ms(1));
+        TIMED_STEP(STEP_WAIT, cyw43_arch_wait_for_work_until(make_timeout_time_ms(1)));
     }
 }

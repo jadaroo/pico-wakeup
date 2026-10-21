@@ -12,6 +12,7 @@ A walk through the design and the firmware, written for learning. Back to the
 - [Waking the laptop over USB](#waking-the-laptop-over-usb)
 - [The client: confirmation and resending](#the-client-confirmation-and-resending)
 - [The LED](#the-led)
+- [Diagnostics](#diagnostics)
 - [TLS](#tls)
 - [Configuration headers](#configuration-headers)
 - [Design decisions](#design-decisions)
@@ -193,8 +194,9 @@ would free the connection under lwIP's feet. So callbacks only **set
 flags**, and `net_task()` acts on them afterwards. `mqtt_connection_cb()`
 works the same way.
 
-**Unavoidable stall:** the TLS handshake's elliptic-curve math takes roughly
-a second inside `cyw43_arch_poll()`. That's well within the 8 s watchdog.
+**Unavoidable stall:** the TLS handshake's elliptic-curve math blocks inside
+`cyw43_arch_poll()`. It was measured at 859 ms on this setup, well within the
+8 s watchdog. (The RP2040's watchdog can't be set above ~8.3 s.)
 
 ## Waking the laptop over USB
 
@@ -270,13 +272,61 @@ the Pico is reconnecting is simply dropped, even at QoS 1.
 
 | LED | State |
 |---|---|
-| slow blink (1 Hz) | `WIFI_START`, `WIFI_WAIT`, or backing off before a Wi-Fi retry |
+| off (not touched) | `WIFI_START`, `WIFI_WAIT`: joining Wi-Fi |
+| off | backing off before a Wi-Fi retry |
 | fast blink (4 Hz) | DNS, MQTT connect, or backing off before a broker retry |
 | steady | `MQTT_UP`: shows the `led_on` setting, which `toggle` flips |
 
 The LED is wired to the CYW43 Wi-Fi chip, not to an RP2040 pin, so every
-change is an SPI transaction. `led_task()` only writes when the wanted value
+change is a command sent to that chip. **Never write it while the chip is
+joining a network.** That hangs the driver for seconds (see
+[Diagnostics](#diagnostics)), so `led_task()` doesn't touch the LED in the
+two Wi-Fi join states. Otherwise it only writes when the wanted value
 changes.
+
+## Diagnostics
+
+The firmware measures itself, so a hang can be located without a debugger:
+
+- **Every main-loop step is timed** (`TIMED_STEP()` in `main.c`: `usb`,
+  `poll`, `kbd`, `net`, `led`, `status`, `wait`). A step that blocks for
+  ≥ 1 s logs `[diag] <step> step blocked for N ms (state <state>)`.
+- **The state survives a watchdog reset.** The RP2040's watchdog scratch
+  registers 0–3 keep their values through a watchdog reset; the SDK and
+  bootrom use 4–7. Every loop iteration stores the connection state and the
+  step currently running there.
+- **The reset cause is read at boot** (`reset_cause()`):
+
+  | Cause | How it's detected |
+  |---|---|
+  | `watchdog-timeout` | the watchdog's `TIMER` reason plus the marker that `watchdog_enable()` sets |
+  | `reboot` | a deliberate watchdog reboot, e.g. picotool's reset |
+  | `run-pin` | the chip's reset register shows the RUN pin |
+  | `debugger` | the chip's reset register shows a debugger restart |
+  | `power-on` | power-on reset, including a supply dip; the RP2040 has no separate brown-out flag |
+
+- **It's published once per boot** in the `online` status:
+  `reset=watchdog-timeout hung-in=<state>/<step>`, plus `connect-ms` and
+  `longest-step-ms`. So you can read the cause remotely over MQTT.
+
+### The bug these diagnostics found
+
+The first version of the status LED blinked it at 1 Hz while joining
+Wi-Fi. The Pico then rebooted every ~11 s:
+
+```
+[boot] reset=watchdog-timeout hung-in=wifi-wait/led prev-longest-ms=7(net)
+[diag] led step blocked for 6877 ms (state wifi-wait)
+```
+
+The first suspect was the TLS handshake, but the report showed the hang was
+in the `led` step during `wifi-wait`. The measured TLS cost turned out to be
+small: the whole connect took 913 ms, with the longest step 859 ms.
+Skipping LED writes during the join fixed it.
+
+The lesson: measure first. The watchdog kept the device recovering, but it
+also hid the hang until the cause was recorded somewhere that survives the
+reset.
 
 ## TLS
 

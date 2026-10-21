@@ -12,7 +12,7 @@ Run these from another machine (or the laptop itself, for the first three):
 |---|---|---|
 | Connectivity | `client/wake.sh status` | `done`, exit 0 |
 | Key tap (laptop awake) | `client/wake.sh` | `event=wakeup:key-tap-sent`, exit 0 |
-| LED | `client/wake.sh toggle` twice | LED off, then on again |
+| LED | `client/wake.sh toggle` twice | LED off, then on again; at boot: off while joining Wi-Fi, fast blink, then steady |
 | Remote sleep | `client/wake.sh sleep` | `sleep:sleep-key-sent`, then `laptop-asleep`; the laptop suspends |
 | Remote wake | `client/wake.sh` (laptop asleep) | `remote-wakeup-sent`, then `laptop-awake` within a few seconds |
 | Wake + connect | `client/wake.sh && ssh user@<tailscale-ip>` | SSH connects right after `done` |
@@ -62,5 +62,18 @@ Each test says what the log should show.
 There's no command to hang the firmware on purpose. To see the watchdog
 work, temporarily add `while (1) {}` to `handle_message()` for some command,
 flash it, and send that command. About 8 s later the Pico reboots and logs
-`[boot] previous run was reset by the watchdog`. Remove the test code
+`[boot] reset=watchdog-timeout hung-in=mqtt-up/poll`. The incoming message
+is handled inside `cyw43_arch_poll()`, so it hangs in the `poll` step. The
+next `online` status carries the same information. Remove the test code
 afterwards.
+
+### Reboot loop check
+
+After flashing, count USB reconnects for a few minutes. A healthy Pico
+connects once and stays:
+
+```fish
+journalctl -k --since "-5min" | grep -c 'usb 1-4: USB disconnect'
+```
+
+Read the reason for the last restart from the `online` status (`reset=`).
